@@ -28,8 +28,13 @@ fi
 read -rp "Do you want to export the whole DB or a single collection? [db/col] " SCOPE
 SCOPE=${SCOPE,,} # lowercase
 
-OUTPUT_DIR="./dumpfile"
+# ===== Step 3: Create timestamped output directory =====
+TS=$(date +%Y-%m-%dT%H:%M:%S)
+OUTPUT_DIR="$(pwd)/dumpfile/$TS"
 mkdir -p "$OUTPUT_DIR"
+
+# ===== Step 4: Export logic =====
+EXPORTED_FILES=()
 
 if [[ "$SCOPE" == "col" ]]; then
   # Select collection
@@ -45,6 +50,7 @@ if [[ "$SCOPE" == "col" ]]; then
   OUT_FILE="${OUTPUT_DIR}/${DB_NAME}.${COLLECTION_NAME}.json"
   echo "⏳ Exporting $DB_NAME.$COLLECTION_NAME to $OUT_FILE..."
   mongoexport --uri="$DB_URI" --db="$DB_NAME" --collection="$COLLECTION_NAME" --out="$OUT_FILE" --jsonArray
+  EXPORTED_FILES+=("$OUT_FILE")
 
 else
   # Export all collections in DB
@@ -54,10 +60,14 @@ else
     OUT_FILE="${OUTPUT_DIR}/${DB_NAME}.${col}.json"
     echo "⏳ Exporting collection '$col' to $OUT_FILE..."
     mongoexport --uri="$DB_URI" --db="$DB_NAME" --collection="$col" --out="$OUT_FILE" --jsonArray
+    EXPORTED_FILES+=("$OUT_FILE")
   done
 fi
 
-# ===== Step 3: Done =====
+# ===== Step 5: Done =====
 echo "✅ Export complete!"
-echo "   JSON files saved in directory: $OUTPUT_DIR"
+echo "   JSON files saved full path:"
+for f in "${EXPORTED_FILES[@]}"; do
+  echo "   $f"
+done
 
