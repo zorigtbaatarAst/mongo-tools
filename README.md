@@ -86,7 +86,7 @@ sudo pacman -Syu mongodb-tools fzf
 
 #### macOS (Homebrew ашиглан)
 ```bash
-sudo pacman -Syu mongodb-tools fzf
+brew insptall mongodb-tools fzf
 ```
 
 
