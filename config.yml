@@ -1,0 +1,11 @@
+mongo:
+  uri: mongodb://localhost:27017
+
+paths:
+  import_search_dir: "${HOME}"
+  export_base_dir: "${HOME}/mongo-dumps"
+
+ui:
+  fzf_height: "40%"
+  preview_lines: 50
+
