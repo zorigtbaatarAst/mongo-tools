@@ -1,9 +1,20 @@
 mongo:
-  uri: mongodb://localhost:27017
+  active_profile: local
+
+  profiles:
+    local:
+      uri: mongodb://localhost:27017
+    staging:
+      uri: mongodb://staging-host:27017
+    prod:
+      uri: mongodb://prod-host:27017
 
 paths:
   import_search_dir: "${HOME}"
   export_base_dir: "${HOME}/mongo-dumps"
+
+export:
+  auto_zip: true
 
 ui:
   fzf_height: "40%"
