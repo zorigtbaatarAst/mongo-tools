@@ -2,162 +2,213 @@
 
 # ========================================
 # MongoDB Interactive Import & Export Helper
+# UI + Config Version
 # ========================================
 
-# Check for required commands
+set -e
+
+# ---------- Load Config ----------
+CONFIG_FILE="$HOME/.mongo-helper.conf"
+if [[ -f "$CONFIG_FILE" ]]; then
+  source "$CONFIG_FILE"
+else
+  echo "⚠️  Config file not found: $CONFIG_FILE"
+  echo "👉 Using built-in defaults"
+fi
+
+# ---------- Defaults ----------
+DB_URI=${DB_URI:-"mongodb://localhost:27017"}
+IMPORT_SEARCH_DIR=${IMPORT_SEARCH_DIR:-"$HOME"}
+EXPORT_BASE_DIR=${EXPORT_BASE_DIR:-"./"}
+FZF_HEIGHT=${FZF_HEIGHT:-"40%"}
+PREVIEW_LINES=${PREVIEW_LINES:-50}
+
+# ---------- UI Helpers ----------
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[0;34m"
+NC="\033[0m"
+
+header() {
+  clear
+  echo -e "${BLUE}"
+  echo "========================================"
+  echo " MongoDB Import / Export Helper"
+  echo "========================================"
+  echo -e "${NC}"
+}
+
+error() {
+  echo -e "${RED}❌ $1${NC}"
+  exit 1
+}
+
+success() {
+  echo -e "${GREEN}✅ $1${NC}"
+}
+
+warn() {
+  echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+# ---------- Check Dependencies ----------
 for cmd in mongosh mongoimport mongodump fzf; do
-  if ! command -v "$cmd" &> /dev/null; then
-    echo "❌ Please install '$cmd' to proceed."
-    exit 1
-  fi
+  command -v "$cmd" &>/dev/null || error "Please install '$cmd'"
 done
 
-# MongoDB URI
-DB_URI="mongodb://localhost:27017"
+header
 
-# ===== Step 1: Choose operation =====
-read -rp "Select operation [import/export]: " OP
-OP=${OP,,}  # lowercase
+# ---------- Operation Selection ----------
+OP=$(printf "import\nexport\n" | \
+  fzf --prompt="Select operation> " --height 20% --border)
 
-if [[ "$OP" != "import" && "$OP" != "export" ]]; then
-  echo "❌ Invalid operation. Use 'import' or 'export'."
-  exit 1
-fi
+[[ -z "$OP" ]] && error "Operation cancelled"
 
 # ================================
-# ======== IMPORT LOGIC ==========
+# ============ IMPORT ============
 # ================================
 if [[ "$OP" == "import" ]]; then
+  header
+  echo "📂 Select JSON file to import"
 
-  # 1️⃣ Interactive JSON file picker
-  echo "Select JSON file to import (searching in $HOME):"
-  JSON_FILE=$(find "$HOME" -type f -name '*.json' 2>/dev/null | \
-    fzf --prompt="File> " --height 50% --border \
-        --preview='head -n 50 {}'
-  )
-  if [ -z "$JSON_FILE" ]; then
-    echo "✋ Cancelled during file selection."; exit 1
-  fi
-  if [ ! -f "$JSON_FILE" ]; then
-    echo "❌ File not found: $JSON_FILE"; exit 1
-  fi
+  JSON_FILE=$(find "$IMPORT_SEARCH_DIR" -type f -name '*.json' 2>/dev/null | \
+    fzf --prompt="File> " \
+        --height "$FZF_HEIGHT" \
+        --border \
+        --preview="head -n $PREVIEW_LINES {}")
 
-  # Derive basename without extension
-  iBASENAME=$(basename "$JSON_FILE" .json)
-  if [[ "$iBASENAME" == *.* ]]; then
-    DEFAULT_DB="${iBASENAME%%.*}"
-    DEFAULT_COLLECTION="${iBASENAME#*.}"
+  [[ -z "$JSON_FILE" ]] && error "File selection cancelled"
+
+  BASENAME=$(basename "$JSON_FILE" .json)
+  if [[ "$BASENAME" == *.* ]]; then
+    DEFAULT_DB="${BASENAME%%.*}"
+    DEFAULT_COLLECTION="${BASENAME#*.}"
   else
     DEFAULT_DB=""
-    DEFAULT_COLLECTION="$iBASENAME"
+    DEFAULT_COLLECTION="$BASENAME"
   fi
 
-  # 2️⃣ Select Database
-  echo "Fetching database list..."
-  mapfile -t ALL_DBS < <(mongosh --quiet --eval "db.adminCommand('listDatabases').databases.map(d=>d.name).join('\n')")
-  DB_NAME=$(printf "%s\n" "${ALL_DBS[@]}" | \
-    fzf --prompt="Database> " --height 30% --border --query="$DEFAULT_DB")
-  if [ -z "$DB_NAME" ]; then
-    echo "✋ Cancelled during database selection."; exit 1
+  header
+  echo "🗄️  Select database"
+
+  mapfile -t DBS < <(
+    mongosh --quiet --eval \
+    "db.adminCommand('listDatabases').databases.map(d=>d.name).join('\n')"
+  )
+
+  DB_NAME=$(printf "%s\n" "${DBS[@]}" | \
+    fzf --query="$DEFAULT_DB" --prompt="Database> " --height 30% --border)
+
+  [[ -z "$DB_NAME" ]] && error "Database selection cancelled"
+
+  header
+  echo "📑 Select collection"
+
+  mapfile -t COLS < <(
+    mongosh --quiet --eval \
+    "db.getSiblingDB('$DB_NAME').getCollectionNames().join('\n')"
+  )
+
+  COLLECTION_NAME=$(printf "%s\n" "${COLS[@]}" | \
+    fzf --query="$DEFAULT_COLLECTION" \
+        --prompt="Collection (Enter=new)> " \
+        --height 30% --border) || true
+
+  if [[ -z "$COLLECTION_NAME" ]]; then
+    read -rp "Collection name [$DEFAULT_COLLECTION]: " COLLECTION_NAME
+    COLLECTION_NAME=${COLLECTION_NAME:-$DEFAULT_COLLECTION}
   fi
 
-  # 3️⃣ Select Collection
-  echo "Fetching collection list for DB '$DB_NAME'..."
-  mapfile -t ALL_COLS < <(mongosh --quiet --eval "db.getSiblingDB('$DB_NAME').getCollectionNames().join('\n')")
-  COLLECTION_NAME=$(printf "%s\n" "${ALL_COLS[@]}" | \
-    fzf --prompt="Collection> " --height 30% --border --query="$DEFAULT_COLLECTION" --header="[Enter: select, Ctrl-C: cancel, Ctrl-E: manual input]")
+  [[ -z "$COLLECTION_NAME" ]] && error "Collection name required"
 
-  if [ $? -ne 0 ] || [ -z "$COLLECTION_NAME" ]; then
-    read -rp "Collection Name [$DEFAULT_COLLECTION]: " input_collection
-    COLLECTION_NAME=${input_collection:-$DEFAULT_COLLECTION}
-    if [ -z "$COLLECTION_NAME" ]; then
-      echo "❌ Collection name cannot be empty."; exit 1
-    fi
-    echo "👉 Using collection: $COLLECTION_NAME"
-  fi
+  EXISTS=$(mongosh --quiet --eval \
+    "db.getSiblingDB('$DB_NAME').getCollectionNames().includes('$COLLECTION_NAME')")
 
-  # 4️⃣ Check if collection exists, ask to drop if yes
-  COL_EXISTS=$(mongosh --quiet --eval "db.getSiblingDB('$DB_NAME').getCollectionNames().includes('$COLLECTION_NAME')")
-  if [[ "$COL_EXISTS" == "true" ]]; then
-    read -rp "⚠️ Collection '$COLLECTION_NAME' exists. Drop it? [y/N]: " DROP_CONFIRM
-    DROP_CONFIRM=${DROP_CONFIRM,,}
-    if [[ "$DROP_CONFIRM" == "y" || "$DROP_CONFIRM" == "yes" ]]; then
-      echo "🔥 Dropping collection..."
-      mongosh --quiet --eval "db.getSiblingDB('$DB_NAME').getCollection('$COLLECTION_NAME').drop()"
-      echo "✅ Collection dropped."
+  if [[ "$EXISTS" == "true" ]]; then
+    read -rp "Drop existing collection? [y/N]: " DROP
+    if [[ "${DROP,,}" == "y" ]]; then
+      mongosh --quiet --eval \
+        "db.getSiblingDB('$DB_NAME').getCollection('$COLLECTION_NAME').drop()"
+      success "Collection dropped"
     else
-      echo "🚫 Keeping existing collection. New documents will be added."
+      warn "Appending to existing collection"
     fi
   fi
 
-  # 5️⃣ Import data
-  echo "⏳ Importing '$JSON_FILE' into $DB_NAME.$COLLECTION_NAME..."
-  mongoimport --uri="$DB_URI" --db "$DB_NAME" --collection "$COLLECTION_NAME" --file "$JSON_FILE" --jsonArray
+  header
+  echo "⏳ Importing data..."
+  mongoimport \
+    --uri="$DB_URI" \
+    --db "$DB_NAME" \
+    --collection "$COLLECTION_NAME" \
+    --file "$JSON_FILE" \
+    --jsonArray
 
-  if [ $? -eq 0 ]; then
-    COUNT=$(mongosh --quiet --eval "db.getSiblingDB('$DB_NAME').getCollection('$COLLECTION_NAME').countDocuments()")
-    echo "✅ Import complete!"
-    echo "   File: $JSON_FILE"
-    echo "   DB: $DB_NAME"
-    echo "   Collection: $COLLECTION_NAME"
-    echo "   Documents now: $COUNT"
-  else
-    echo "❌ Import failed."; exit 1
-  fi
+  COUNT=$(mongosh --quiet --eval \
+    "db.getSiblingDB('$DB_NAME').getCollection('$COLLECTION_NAME').countDocuments()")
+
+  success "Import complete"
+  echo "📄 File       : $JSON_FILE"
+  echo "🗄️  Database   : $DB_NAME"
+  echo "📑 Collection : $COLLECTION_NAME"
+  echo "🔢 Documents  : $COUNT"
 fi
 
 # ================================
-# ======== EXPORT LOGIC ==========
+# ============ EXPORT ============
 # ================================
 if [[ "$OP" == "export" ]]; then
+  header
+  echo "🗄️  Select database"
 
-  # 1️⃣ Select Database
-  echo "Fetching database list..."
-  mapfile -t ALL_DBS < <(mongosh --quiet --eval "db.adminCommand('listDatabases').databases.map(d=>d.name).join('\n')")
-  DB_NAME=$(printf "%s\n" "${ALL_DBS[@]}" | \
+  mapfile -t DBS < <(
+    mongosh --quiet --eval \
+    "db.adminCommand('listDatabases').databases.map(d=>d.name).join('\n')"
+  )
+
+  DB_NAME=$(printf "%s\n" "${DBS[@]}" | \
     fzf --prompt="Database> " --height 30% --border)
-  if [ -z "$DB_NAME" ]; then
-    echo "✋ Cancelled during database selection."; exit 1
-  fi
 
-  # 2️⃣ Choose scope: DB or collection
-  read -rp "Export whole DB or a single collection? [db/col] " SCOPE
-  SCOPE=${SCOPE,,}
+  [[ -z "$DB_NAME" ]] && error "Database selection cancelled"
+
+  SCOPE=$(printf "database\ncollection\n" | \
+    fzf --prompt="Export scope> " --height 20% --border)
+
+  [[ -z "$SCOPE" ]] && error "Scope selection cancelled"
 
   COLLECTION_NAME=""
-  if [[ "$SCOPE" == "col" ]]; then
-    echo "Fetching collections for DB '$DB_NAME'..."
-    mapfile -t ALL_COLS < <(mongosh --quiet --eval "db.getSiblingDB('$DB_NAME').getCollectionNames().join('\n')")
-    COLLECTION_NAME=$(printf "%s\n" "${ALL_COLS[@]}" | fzf --prompt="Collection> " --height 30% --border)
-    if [ -z "$COLLECTION_NAME" ]; then
-      echo "✋ Cancelled during collection selection."; exit 1
-    fi
+  if [[ "$SCOPE" == "collection" ]]; then
+    mapfile -t COLS < <(
+      mongosh --quiet --eval \
+      "db.getSiblingDB('$DB_NAME').getCollectionNames().join('\n')"
+    )
+
+    COLLECTION_NAME=$(printf "%s\n" "${COLS[@]}" | \
+      fzf --prompt="Collection> " --height 30% --border)
+
+    [[ -z "$COLLECTION_NAME" ]] && error "Collection selection cancelled"
   fi
 
-  # 3️⃣ Output directory
   TS=$(date +%Y%m%d_%H%M%S)
-  if [ -n "$COLLECTION_NAME" ]; then
-    OUTPUT_DIR="./dump-${DB_NAME}-${COLLECTION_NAME}-${TS}"
-  else
-    OUTPUT_DIR="./dump-${DB_NAME}-${TS}"
-  fi
-  mkdir -p "$OUTPUT_DIR"
+  OUT="$EXPORT_BASE_DIR/dump-${DB_NAME}${COLLECTION_NAME:+-$COLLECTION_NAME}-$TS"
+  mkdir -p "$OUT"
 
-  # 4️⃣ Run mongodump
-  if [ -n "$COLLECTION_NAME" ]; then
-    echo "⏳ Dumping collection '$DB_NAME.$COLLECTION_NAME'..."
-    mongodump --uri="$DB_URI" --db "$DB_NAME" --collection "$COLLECTION_NAME" --out "$OUTPUT_DIR"
+  header
+  echo "⏳ Exporting..."
+
+  if [[ -n "$COLLECTION_NAME" ]]; then
+    mongodump --uri="$DB_URI" \
+      --db "$DB_NAME" \
+      --collection "$COLLECTION_NAME" \
+      --out "$OUT"
   else
-    echo "⏳ Dumping entire database '$DB_NAME'..."
-    mongodump --uri="$DB_URI" --db "$DB_NAME" --out "$OUTPUT_DIR"
+    mongodump --uri="$DB_URI" \
+      --db "$DB_NAME" \
+      --out "$OUT"
   fi
 
-  # 5️⃣ Check result
-  if [ $? -eq 0 ]; then
-    echo "✅ Dump complete!"
-    echo "   Output directory: $OUTPUT_DIR"
-  else
-    echo "❌ Dump failed."; exit 1
-  fi
+  success "Export complete"
+  echo "📁 Output: $OUT"
 fi
 
